@@ -2385,6 +2385,26 @@ static const struct zxdg_output_v1_listener output_listener = {
     .description = output_description,
 };
 
+static void seat_capabilities(void *data, struct wl_seat *wl_seat,
+                              uint32_t capabilities) {
+  bool has_pointer = capabilities & WL_SEAT_CAPABILITY_POINTER;
+  if (has_pointer && !pointer) {
+    pointer = wl_seat_get_pointer(wl_seat);
+    wl_pointer_add_listener(pointer, &pointer_listener, NULL);
+  } else if (!has_pointer && pointer) {
+    wl_pointer_release(pointer);
+    pointer = NULL;
+  }
+}
+
+static void seat_name(void *data, struct wl_seat *wl_seat, const char *name) {
+}
+
+static const struct wl_seat_listener seat_listener = {
+    .capabilities = seat_capabilities,
+    .name = seat_name,
+};
+
 static void registry_global(void *data, struct wl_registry *registry,
                             uint32_t name, const char *interface,
                             uint32_t version) {
@@ -2410,8 +2430,7 @@ static void registry_global(void *data, struct wl_registry *registry,
   }
   else if (strcmp(interface, wl_seat_interface.name) == 0) {
     seat = wl_registry_bind(registry, name, &wl_seat_interface, 7);
-    pointer = wl_seat_get_pointer(seat);
-    wl_pointer_add_listener(pointer, &pointer_listener, NULL);
+    wl_seat_add_listener(seat, &seat_listener, NULL);
   } else if (strcmp(interface, wl_output_interface.name) == 0) {
     // Defer surface creation until the xdg-output name arrives so the profile
     // can be matched first.
