@@ -5,6 +5,7 @@
     "buffer-scale": 1,
     // "scroll-interval": 100,
     // "smooth-scrolling-threshold": 5.0,
+    // "sys-interval": 2,  // default refresh interval (seconds) for polled modules
 
     "modules-left": [
         "workspaces",
@@ -47,16 +48,19 @@
 
     "network": {
         "format": "󰈀 {ifname}",
-        "format-alt": "↓{down} ↑{up}"
+        "format-alt": "↓{down} ↑{up}",
+        // "interval": 1  // seconds; omit to use the global "sys-interval"
     },
     "hideclients": {
         "format": " {}"
     },
     "cpu": {
-        "format": " {load}%"
+        "format": " {load}%",
+        // "interval": 1  // seconds; omit to use the global "sys-interval"
     },
     "memory": {
-        "format": " {}%"
+        "format": " {}%",
+        // "interval": 5  // seconds; omit to use the global "sys-interval"
     },
     "backlight": {
         "format": "{icon} {percent}%",

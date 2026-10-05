@@ -90,6 +90,9 @@ typedef struct {
   int layer;
   int max_title_len;
   int sys_interval;
+  int cpu_interval; // seconds; 0 = use sys_interval
+  int mem_interval; // seconds; 0 = use sys_interval
+  int net_interval; // seconds; 0 = use sys_interval
   int tag_count;
   int scroll_interval; // ms; 0 disables scroll debounce
   double smooth_scroll_threshold; // axis units per synthetic scroll step

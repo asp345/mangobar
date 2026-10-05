@@ -560,6 +560,7 @@ static void parse_module_configs(cJSON *root) {
   m = cJSON_GetObjectItemCaseSensitive(root, "cpu");
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", parse_target->cpu_format, sizeof(parse_target->cpu_format));
+    parse_target->cpu_interval = cfg_int(m, "interval", parse_target->cpu_interval);
     cfg_alt(m, "cpu");
     set_action("cpu", cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
@@ -572,6 +573,7 @@ static void parse_module_configs(cJSON *root) {
   m = cJSON_GetObjectItemCaseSensitive(root, "memory");
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", parse_target->mem_format, sizeof(parse_target->mem_format));
+    parse_target->mem_interval = cfg_int(m, "interval", parse_target->mem_interval);
     cfg_alt(m, "mem");
     set_action("mem", cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click")),
                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "on-click-middle")),
@@ -674,6 +676,7 @@ static void parse_module_configs(cJSON *root) {
   m = cJSON_GetObjectItemCaseSensitive(root, "network");
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", parse_target->network_format, sizeof(parse_target->network_format));
+    parse_target->net_interval = cfg_int(m, "interval", parse_target->net_interval);
     cfg_alt(m, "network");
     set_module_actions(m, "network");
   }
@@ -717,6 +720,9 @@ static void defaults_into(MangoConfig *cfg) {
   cfg->layer = 2; // TOP
   cfg->max_title_len = 50;
   cfg->sys_interval = 2;
+  cfg->cpu_interval = 0; // fall back to sys_interval
+  cfg->mem_interval = 0;
+  cfg->net_interval = 0;
   cfg->smooth_scroll_threshold = 5.0;
   cfg->tag_count = MANGOBAR_MAX_TAGS;
   for (int i = 0; i < cfg->tag_count && i < MANGOBAR_MAX_TAGS; i++)
@@ -846,6 +852,9 @@ static int parse_object_into(cJSON *root, MangoConfig *cfg) {
   if ((v = cJSON_GetObjectItemCaseSensitive(root, "scroll-interval")) &&
       cJSON_IsNumber(v) && v->valueint >= 0)
     cfg->scroll_interval = v->valueint;
+  if ((v = cJSON_GetObjectItemCaseSensitive(root, "sys-interval")) &&
+      cJSON_IsNumber(v) && v->valueint > 0)
+    cfg->sys_interval = v->valueint;
   if ((v = cJSON_GetObjectItemCaseSensitive(root,
                                              "smooth-scrolling-threshold")) &&
       cJSON_IsNumber(v) && v->valuedouble > 0.0)

@@ -4511,45 +4511,47 @@ static void update_battery(void) {
   }
 }
 
-static void update_system_info() {
+// CPU load/usage. The percentage is a rate, so sampling windows shorter than
+// 500ms are skipped to avoid noisy spikes from scroll-triggered refreshes.
+static void update_cpu(void) {
   uint64_t ms = now_ms();
-  // CPU percentage is a rate; skip sampling on very short windows so
-  // scroll-triggered immediate refreshes don't produce noisy spikes.
-  if (ms - last_cpu_ms >= 500) {
-    last_cpu_ms = ms;
-    FILE *f = fopen("/proc/stat", "r");
-    if (f) {
-      char cpu[8];
-      int user, nice, system, idle;
-      if (fscanf(f, "%s %d %d %d %d", cpu, &user, &nice, &system, &idle) ==
-          5) {
-        int total = user + nice + system + idle;
-        int pct = 0;
-        if (cpu_prev_total) {
-          int total_d = total - cpu_prev_total;
-          int idle_d = idle - cpu_prev_idle;
-          if (total_d)
-            pct = 100 * (total_d - idle_d) / total_d;
-        }
-        cpu_prev_total = total;
-        cpu_prev_idle = idle;
-        Bar *b;
-        wl_list_for_each(b, &bar_list, link) b->cpu_pct = pct;
+  if (ms - last_cpu_ms < 500)
+    return;
+  last_cpu_ms = ms;
+  FILE *f = fopen("/proc/stat", "r");
+  if (f) {
+    char cpu[8];
+    int user, nice, system, idle;
+    if (fscanf(f, "%s %d %d %d %d", cpu, &user, &nice, &system, &idle) == 5) {
+      int total = user + nice + system + idle;
+      int pct = 0;
+      if (cpu_prev_total) {
+        int total_d = total - cpu_prev_total;
+        int idle_d = idle - cpu_prev_idle;
+        if (total_d)
+          pct = 100 * (total_d - idle_d) / total_d;
       }
-      fclose(f);
+      cpu_prev_total = total;
+      cpu_prev_idle = idle;
+      Bar *b;
+      wl_list_for_each(b, &bar_list, link) b->cpu_pct = pct;
     }
-    FILE *lf = fopen("/proc/loadavg", "r");
-    if (lf) {
-      double load1 = 0;
-      if (fscanf(lf, "%lf", &load1) == 1) {
-        // Round up to two decimals, matching loadavg's usual display.
-        load1 = ceil(load1 * 100.0) / 100.0;
-        Bar *b;
-        wl_list_for_each(b, &bar_list, link) b->cpu_load = load1;
-      }
-      fclose(lf);
-    }
+    fclose(f);
   }
+  FILE *lf = fopen("/proc/loadavg", "r");
+  if (lf) {
+    double load1 = 0;
+    if (fscanf(lf, "%lf", &load1) == 1) {
+      // Round up to two decimals, matching loadavg's usual display.
+      load1 = ceil(load1 * 100.0) / 100.0;
+      Bar *b;
+      wl_list_for_each(b, &bar_list, link) b->cpu_load = load1;
+    }
+    fclose(lf);
+  }
+}
+
+static void update_mem(void) {
   FILE *f = fopen("/proc/meminfo", "r");
   if (f) {
     long total = 0, avail = 0;
@@ -4565,16 +4567,36 @@ static void update_system_info() {
     Bar *b;
     wl_list_for_each(b, &bar_list, link) b->mem_pct = pct;
   }
-  update_brightness();
-  update_volume();
-  update_battery();
-  update_network();
+}
+
+static void update_clock(void) {
   time_t now = time(NULL);
   struct tm *tm = localtime(&now);
   char ts[16];
   strftime(ts, sizeof(ts), "%H:%M", tm);
   Bar *b;
   wl_list_for_each(b, &bar_list, link) strcpy(b->time_str, ts);
+}
+
+// Full refresh of every polled system module (startup and forced refreshes).
+static void update_system_info(void) {
+  update_cpu();
+  update_mem();
+  update_brightness();
+  update_volume();
+  update_battery();
+  update_network();
+  update_clock();
+}
+
+// Effective polling interval (seconds) for a polled module: a positive
+// per-module override wins, otherwise the global "sys-interval" applies.
+// Always returns at least 1 so callers can compare directly against it.
+static int effective_interval(int override_sec) {
+  int base = g_config_set.profiles[0].config.sys_interval;
+  if (base <= 0)
+    base = 1;
+  return override_sec > 0 ? override_sec : base;
 }
 
 // Run a custom module command and store its (trimmed) output.
@@ -4830,6 +4852,7 @@ static void event_loop() {
       wl_list_for_each(b, &bar_list, link) b->redraw = true;
     }
     static time_t last_sec;
+    static time_t last_cpu_sec, last_mem_sec, last_net_sec;
     static time_t last_tray_refresh;
     time_t sec = time(NULL);
     // Auto-reconnect the watch connection if it drops
@@ -4841,11 +4864,39 @@ static void event_loop() {
       if (ipc_fd >= 0)
         ipc_subscribe();
     }
-    if (sec - last_sec >= g_config_set.profiles[0].config.sys_interval) {
-      last_sec = sec;
-      update_system_info();
-      Bar *b;
-      wl_list_for_each(b, &bar_list, link) b->redraw = true;
+    {
+      const MangoConfig *poll_cfg = &g_config_set.profiles[0].config;
+      bool sys_changed = false;
+      // Event-driven fallbacks (backlight, volume), the clock and battery keep
+      // refreshing on the global sys-interval.
+      if (sec - last_sec >= effective_interval(0)) {
+        last_sec = sec;
+        update_brightness();
+        update_volume();
+        update_battery();
+        update_clock();
+        sys_changed = true;
+      }
+      // Polled modules honor their own interval when configured.
+      if (sec - last_cpu_sec >= effective_interval(poll_cfg->cpu_interval)) {
+        last_cpu_sec = sec;
+        update_cpu();
+        sys_changed = true;
+      }
+      if (sec - last_mem_sec >= effective_interval(poll_cfg->mem_interval)) {
+        last_mem_sec = sec;
+        update_mem();
+        sys_changed = true;
+      }
+      if (sec - last_net_sec >= effective_interval(poll_cfg->net_interval)) {
+        last_net_sec = sec;
+        update_network();
+        sys_changed = true;
+      }
+      if (sys_changed) {
+        Bar *b;
+        wl_list_for_each(b, &bar_list, link) b->redraw = true;
+      }
     }
     // Periodically refresh the tray to rediscover items
     if (tray && sec - last_tray_refresh >= 10) {
