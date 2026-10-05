@@ -14,6 +14,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <wayland-util.h>
 
 #define WATCHER_PATH "/StatusNotifierWatcher"
 #define DEFAULT_ICON_SIZE 64
@@ -43,8 +44,18 @@ struct MangobarTrayItem {
   unsigned icon_rev;
   sd_bus_slot **slots;
   int slot_count;
+  struct wl_list pending_props;
   struct MangobarTray *tray;
 };
+
+typedef struct {
+  struct wl_list link;
+  MangobarTrayItem *sni;
+  const char *prop;
+  const char *type; // NULL = icon pixmap
+  void *dest;
+  sd_bus_slot *slot;
+} PropSlot;
 
 typedef struct {
   char *interface;
@@ -640,6 +651,11 @@ static void destroy_sni(MangobarTrayItem *sni) {
   for (int i = 0; i < sni->slot_count; i++)
     sd_bus_slot_unref(sni->slots[i]);
   free(sni->slots);
+  PropSlot *d, *tmp;
+  wl_list_for_each_safe(d, tmp, &sni->pending_props, link) {
+    sd_bus_slot_unref(d->slot);
+    free(d);
+  }
   free(sni);
 }
 
@@ -694,13 +710,6 @@ static void sni_dirty(MangobarTrayItem *sni) {
 }
 
 // ---------- Async property reads ----------
-typedef struct {
-  MangobarTrayItem *sni;
-  const char *prop;
-  const char *type; // NULL = icon pixmap
-  void *dest;
-} PropSlot;
-
 static int read_pixmap(sd_bus_message *msg, MangobarTrayItem *sni,
                        bool attention) {
   int ret = sd_bus_message_enter_container(msg, 'a', "(iiay)");
@@ -794,6 +803,8 @@ static int get_property_callback(sd_bus_message *msg, void *data,
                                              : strncmp(prop, "Icon", 4) == 0)))
     sni_dirty(sni);
 cleanup:
+  wl_list_remove(&d->link);
+  sd_bus_slot_unref(d->slot);
   free(d);
   return ret;
 }
@@ -806,11 +817,13 @@ static void sni_get_property_async(MangobarTrayItem *sni, const char *prop,
   data->type = type;
   data->dest = dest;
   int ret = sd_bus_call_method_async(
-      sni->tray->bus, NULL, sni->service, sni->path,
+      sni->tray->bus, &data->slot, sni->service, sni->path,
       "org.freedesktop.DBus.Properties", "Get", get_property_callback, data,
       "ss", sni->interface, prop);
   if (ret < 0)
     free(data);
+  else
+    wl_list_insert(&sni->pending_props, &data->link);
 }
 
 // ---------- Item signals ----------
@@ -860,6 +873,7 @@ static MangobarTrayItem *create_sni(char *id, MangobarTray *tray) {
   MangobarTrayItem *sni = calloc(1, sizeof(*sni));
   if (!sni)
     return NULL;
+  wl_list_init(&sni->pending_props);
   sni->tray = tray;
   sni->watcher_id = strdup(id);
   char *path_ptr = strchr(id, '/');

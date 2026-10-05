@@ -13,7 +13,7 @@ struct MangobarMenu {
   MangobarMenuNode *current; // node currently shown (may be a submenu)
   void (*on_layout)(void *data);
   void *userdata;
-  bool fetching;
+  sd_bus_slot *layout_slot;
   bool has_layout;
 };
 
@@ -45,6 +45,7 @@ MangobarMenu *menu_init(sd_bus *bus, const char *service, const char *path,
 void menu_destroy(MangobarMenu *m) {
   if (!m)
     return;
+  sd_bus_slot_unref(m->layout_slot);
   free_node(m->root);
   free(m->service);
   free(m->path);
@@ -163,7 +164,7 @@ err:
 static int layout_callback(sd_bus_message *msg, void *data,
                            sd_bus_error *error) {
   MangobarMenu *m = data;
-  m->fetching = false;
+  m->layout_slot = sd_bus_slot_unref(m->layout_slot);
   if (sd_bus_message_is_method_error(msg, NULL)) {
     m->has_layout = false;
     if (m->on_layout)
@@ -189,15 +190,14 @@ static int layout_callback(sd_bus_message *msg, void *data,
 }
 
 void menu_refresh(MangobarMenu *m) {
-  if (!m || m->fetching)
+  if (!m || m->layout_slot)
     return;
-  m->fetching = true;
   // AboutToShow(0) tells the service to prepare the menu
   sd_bus_call_method_async(m->bus, NULL, m->service, m->path,
                            "com.canonical.dbusmenu", "AboutToShow", NULL, NULL,
                            "i", 0);
   // GetLayout fetches the layout
-  sd_bus_call_method_async(m->bus, NULL, m->service, m->path,
+  sd_bus_call_method_async(m->bus, &m->layout_slot, m->service, m->path,
                            "com.canonical.dbusmenu", "GetLayout",
                            layout_callback, m, "iias", 0, -1, NULL);
 }
