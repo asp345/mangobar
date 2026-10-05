@@ -2887,7 +2887,7 @@ typedef struct {
   struct wl_buffer *grab_buffer;
   uint32_t grab_width, grab_height, grab_stride, grab_bufsize;
   // Pending open when the Menu property isn't loaded yet
-  MangobarTrayItem *pending_item;
+  char pending_id[512];
   Bar *pending_bar;
   int pending_x, pending_y;
   uint64_t pending_ms;
@@ -2923,7 +2923,7 @@ static void menu_close(void) {
 
 static void menu_output_removed(struct wl_output *output) {
   if (popup.pending_bar && popup.pending_bar->wl_output == output) {
-    popup.pending_item = NULL;
+    popup.pending_id[0] = '\0';
     popup.pending_bar = NULL;
   }
   if (popup.open && popup.output == output)
@@ -2944,7 +2944,8 @@ static void tray_right_click(Bar *bar, double x, double y) {
       if (tray_item_has_menu(h->item)) {
         menu_open(bar, h->item, x, y);
       } else {
-        popup.pending_item = h->item;
+        snprintf(popup.pending_id, sizeof(popup.pending_id), "%s",
+                 tray_item_id(h->item));
         popup.pending_bar = bar;
         popup.pending_x = (int)x;
         popup.pending_y = (int)y;
@@ -2954,6 +2955,15 @@ static void tray_right_click(Bar *bar, double x, double y) {
       return;
     }
   }
+}
+
+static MangobarTrayItem *find_tray_item(const char *id) {
+  int count = 0;
+  MangobarTrayItem **items = tray_visible_items(tray, &count);
+  for (int i = 0; i < count; i++)
+    if (strcmp(tray_item_id(items[i]), id) == 0)
+      return items[i];
+  return NULL;
 }
 
 static void update_menu_hover(double y) {
@@ -4609,7 +4619,10 @@ static bool update_custom_modules(void) {
 
 static void tray_set_dirty() {
   Bar *b;
-  wl_list_for_each(b, &bar_list, link) b->redraw = true;
+  wl_list_for_each(b, &bar_list, link) {
+    b->redraw = true;
+    b->tray_hotspot_count = 0;
+  }
 }
 
 static void custom_signal_handler(int signo) {
@@ -4853,11 +4866,11 @@ static void event_loop() {
     // Auto-open submenus on hover
     menu_hover_tick();
     // Retry opening the tray menu when its property wasn't ready
-    if (popup.pending_item && now_ms() - popup.pending_ms >= 300) {
-      MangobarTrayItem *pi = popup.pending_item;
+    if (popup.pending_id[0] && now_ms() - popup.pending_ms >= 300) {
+      MangobarTrayItem *pi = find_tray_item(popup.pending_id);
       Bar *pb = popup.pending_bar;
       int px = popup.pending_x, py = popup.pending_y;
-      popup.pending_item = NULL;
+      popup.pending_id[0] = '\0';
       popup.pending_bar = NULL;
       if (pi && pb && tray_item_has_menu(pi))
         menu_open(pb, pi, px, py);
