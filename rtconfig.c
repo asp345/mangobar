@@ -197,12 +197,12 @@ static void convert_clock_format(const char *in, char *out, size_t sz) {
   out[o] = '\0';
 }
 
-static void add_action(const char *module, const char *left,
+static void add_action(MangoConfig *cfg, const char *module, const char *left,
                        const char *middle, const char *right,
                        const char *scroll_up, const char *scroll_down) {
-  if (parse_target->action_count >= MANGOBAR_MAX_ACTIONS)
+  if (cfg->action_count >= MANGOBAR_MAX_ACTIONS)
     return;
-  MangoAction *a = &parse_target->actions[parse_target->action_count];
+  MangoAction *a = &cfg->actions[cfg->action_count];
   cfg_set(a->module, sizeof(a->module), module);
   cfg_set(a->left, sizeof(a->left), left);
   cfg_set(a->middle, sizeof(a->middle), middle);
@@ -211,7 +211,7 @@ static void add_action(const char *module, const char *left,
   cfg_set(a->scroll_down, sizeof(a->scroll_down), scroll_down);
   a->scroll_interval = -1;
   a->smooth_scroll_threshold = -1.0;
-  parse_target->action_count++;
+  cfg->action_count++;
 }
 
 static void set_action(const char *module, const char *left,
@@ -230,7 +230,8 @@ static void set_action(const char *module, const char *left,
       return;
     }
   }
-  add_action(module, left, middle, right, scroll_up, scroll_down);
+  add_action(parse_target, module, left, middle, right, scroll_up,
+             scroll_down);
 }
 
 static void set_alt(const char *module, const char *fmt) {
@@ -786,9 +787,9 @@ static void defaults_into(MangoConfig *cfg) {
   snprintf(cfg->volume_muted_icon, sizeof(cfg->volume_muted_icon), "%s",
            "󰝟");
   snprintf(cfg->volume_bt_icon, sizeof(cfg->volume_bt_icon), "%s", "󰂯");
-  add_action("tags", "@view", NULL, NULL, NULL, NULL);
-  add_action("volume", NULL, NULL, NULL, "pamixer -i 2", "pamixer -d 2");
-  add_action("brightness", NULL, NULL, NULL, "brightnessctl s +5%",
+  add_action(cfg, "tags", "@view", NULL, NULL, NULL, NULL);
+  add_action(cfg, "volume", NULL, NULL, NULL, "pamixer -i 2", "pamixer -d 2");
+  add_action(cfg, "brightness", NULL, NULL, NULL, "brightnessctl s +5%",
              "brightnessctl s 5%-");
   // Default module layout
   cfg->left_order[cfg->left_count++] = M_TAGS;
