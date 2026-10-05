@@ -235,6 +235,39 @@ static ProfileRuntime *g_runtimes; // one per profile, indexed by pointer diff
 // ---------- Format helpers ----------
 static uint32_t text_metrics(const char *text, int32_t *min_x, int32_t *max_x);
 
+#define LENGTH(x) (sizeof(x) / sizeof((x)[0]))
+
+typedef struct {
+  const char *key;
+  const char *value;
+} FmtArg;
+
+static void format_expand(const char *fmt, const FmtArg *args, size_t nargs,
+                          char *out, size_t outsz) {
+  size_t o = 0;
+  const char *p = fmt ? fmt : "";
+  while (*p && o + 1 < outsz) {
+    size_t i = 0;
+    while (i < nargs && strncmp(p, args[i].key, strlen(args[i].key)) != 0)
+      i++;
+    if (i == nargs) {
+      out[o++] = *p++;
+      continue;
+    }
+    const char *v = args[i].value ? args[i].value : "";
+    if (!*v)
+      while (o > 0 && out[o - 1] == ' ')
+        o--;
+    size_t n = strlen(v);
+    if (n > outsz - 1 - o)
+      n = outsz - 1 - o;
+    memcpy(out + o, v, n);
+    o += n;
+    p += strlen(args[i].key);
+  }
+  out[o] = '\0';
+}
+
 static void format_value_full(const char *fmt, const char *value,
                               const char *load, const char *icon, char *out,
                               size_t outsz) {
@@ -242,52 +275,16 @@ static void format_value_full(const char *fmt, const char *value,
     snprintf(out, outsz, "%s", value ? value : "");
     return;
   }
-  size_t o = 0;
-  const char *p = fmt;
-  while (*p && o + 1 < outsz) {
-    if (p[0] == '{' && p[1] == '}') {
-      if (value)
-        o += snprintf(out + o, outsz - o, "%s", value);
-      p += 2;
-    } else if (strncmp(p, "{percent}", 9) == 0) {
-      if (value)
-        o += snprintf(out + o, outsz - o, "%s", value);
-      p += 9;
-    } else if (strncmp(p, "{load}", 6) == 0) {
-      if (load)
-        o += snprintf(out + o, outsz - o, "%s", load);
-      else if (value)
-        o += snprintf(out + o, outsz - o, "%s", value);
-      p += 6;
-    } else if (strncmp(p, "{usage}", 7) == 0) {
-      if (value)
-        o += snprintf(out + o, outsz - o, "%s", value);
-      p += 7;
-    } else if (strncmp(p, "{volume}", 8) == 0) {
-      if (value)
-        o += snprintf(out + o, outsz - o, "%s", value);
-      p += 8;
-    } else if (strncmp(p, "{title}", 7) == 0) {
-      if (value)
-        o += snprintf(out + o, outsz - o, "%s", value);
-      p += 7;
-    } else if (strncmp(p, "{layout}", 8) == 0) {
-      if (value)
-        o += snprintf(out + o, outsz - o, "%s", value);
-      p += 8;
-    } else if (strncmp(p, "{ifname}", 8) == 0) {
-      if (value)
-        o += snprintf(out + o, outsz - o, "%s", value);
-      p += 8;
-    } else if (strncmp(p, "{icon}", 6) == 0) {
-      if (icon)
-        o += snprintf(out + o, outsz - o, "%s", icon);
-      p += 6;
-    } else {
-      out[o++] = *p++;
-    }
-  }
-  out[o] = '\0';
+  const FmtArg args[] = {{"{}", value},
+                         {"{percent}", value},
+                         {"{load}", load ? load : value},
+                         {"{usage}", value},
+                         {"{volume}", value},
+                         {"{title}", value},
+                         {"{layout}", value},
+                         {"{ifname}", value},
+                         {"{icon}", icon}};
+  format_expand(fmt, args, LENGTH(args), out, outsz);
 }
 
 static void format_value(const char *fmt, const char *value, const char *icon,
@@ -308,29 +305,12 @@ static void format_battery(const char *fmt, int percent, const char *status,
                            size_t outsz) {
   char pct[16];
   snprintf(pct, sizeof(pct), "%d", percent);
-  size_t o = 0;
-  const char *p = fmt ? fmt : "";
-  while (*p && o + 1 < outsz) {
-    if (p[0] == '{' && p[1] == '}') {
-      o += snprintf(out + o, outsz - o, "%s", pct);
-      p += 2;
-    } else if (strncmp(p, "{percent}", 9) == 0) {
-      o += snprintf(out + o, outsz - o, "%s", pct);
-      p += 9;
-    } else if (strncmp(p, "{icon}", 6) == 0) {
-      o += snprintf(out + o, outsz - o, "%s", icon ? icon : "");
-      p += 6;
-    } else if (strncmp(p, "{status}", 8) == 0) {
-      o += snprintf(out + o, outsz - o, "%s", status ? status : "");
-      p += 8;
-    } else if (strncmp(p, "{ac}", 4) == 0) {
-      o += snprintf(out + o, outsz - o, "%s", ac ? ac : "");
-      p += 4;
-    } else {
-      out[o++] = *p++;
-    }
-  }
-  out[o] = '\0';
+  const FmtArg args[] = {{"{}", pct},
+                         {"{percent}", pct},
+                         {"{icon}", icon},
+                         {"{status}", status},
+                         {"{ac}", ac}};
+  format_expand(fmt, args, LENGTH(args), out, outsz);
 }
 
 // Pick an icon from a level array based on percent (0..100)
@@ -350,34 +330,13 @@ static void format_volume(const char *fmt, int pct, const char *icon,
                           const char *bt, char *out, size_t outsz) {
   char p[16];
   snprintf(p, sizeof(p), "%d", pct);
-  size_t o = 0;
-  const char *q = fmt ? fmt : "";
-  while (*q && o + 1 < outsz) {
-    if (q[0] == '{' && q[1] == '}') {
-      o += snprintf(out + o, outsz - o, "%s", p);
-      q += 2;
-    } else if (strncmp(q, "{volume}", 8) == 0 ||
-               strncmp(q, "{percent}", 9) == 0) {
-      int n = strncmp(q, "{volume}", 8) == 0 ? 8 : 9;
-      o += snprintf(out + o, outsz - o, "%s", p);
-      q += n;
-    } else if (strncmp(q, "{icon}", 6) == 0) {
-      o += snprintf(out + o, outsz - o, "%s", icon ? icon : "");
-      q += 6;
-    } else if (strncmp(q, "{bluetooth}", 11) == 0 ||
-               strncmp(q, "{bt}", 4) == 0) {
-      int n = strncmp(q, "{bluetooth}", 11) == 0 ? 11 : 4;
-      if (bt && *bt)
-        o += snprintf(out + o, outsz - o, "%s", bt);
-      else
-        while (o > 0 && out[o - 1] == ' ')
-          o--;
-      q += n;
-    } else {
-      out[o++] = *q++;
-    }
-  }
-  out[o] = '\0';
+  const FmtArg args[] = {{"{}", p},
+                         {"{volume}", p},
+                         {"{percent}", p},
+                         {"{icon}", icon},
+                         {"{bluetooth}", bt},
+                         {"{bt}", bt}};
+  format_expand(fmt, args, LENGTH(args), out, outsz);
 }
 
 // Speed units: KB/s under 1MB/s, otherwise MB/s
@@ -393,20 +352,8 @@ static void format_network_alt(const char *fmt, const char *ifname,
                                const char *down, const char *up, char *out,
                                size_t outsz) {
   char tmp[512];
-  size_t o = 0;
-  const char *p = fmt ? fmt : "";
-  while (*p && o + 1 < sizeof(tmp)) {
-    if (strncmp(p, "{down}", 6) == 0) {
-      o += snprintf(tmp + o, sizeof(tmp) - o, "%s", down);
-      p += 6;
-    } else if (strncmp(p, "{up}", 4) == 0) {
-      o += snprintf(tmp + o, sizeof(tmp) - o, "%s", up);
-      p += 4;
-    } else {
-      tmp[o++] = *p++;
-    }
-  }
-  tmp[o] = '\0';
+  const FmtArg args[] = {{"{down}", down}, {"{up}", up}};
+  format_expand(fmt, args, LENGTH(args), tmp, sizeof(tmp));
   format_value(tmp, ifname, "", out, outsz);
 }
 
