@@ -118,6 +118,14 @@ typedef struct {
   char keymode_format[64];
   char keyboardlayout_format[64];
   char network_format[64];
+  char network_format_disconnected[64]; // empty = reuse network_format
+  char network_format_wifi[64];         // empty = reuse network_format
+  char network_format_ethernet[64];     // empty = reuse network_format
+  char network_icon_wifi[16];
+  char network_icon_ethernet[16];
+  char network_icon_disconnected[16];
+  char network_signal_icons[MANGOBAR_MAX_ICONS][16]; // weak -> strong
+  int network_signal_icon_count;
   char hide_clients_format[64];
   MangoBatteryCfg batteries[MANGOBAR_MAX_BATTERIES];
   int battery_count;

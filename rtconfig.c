@@ -677,6 +677,20 @@ static void parse_module_configs(cJSON *root) {
   m = cJSON_GetObjectItemCaseSensitive(root, "network");
   if (cJSON_IsObject(m)) {
     cfg_str(m, "format", parse_target->network_format, sizeof(parse_target->network_format));
+    cfg_str(m, "format-disconnected", parse_target->network_format_disconnected,
+            sizeof(parse_target->network_format_disconnected));
+    cfg_str(m, "format-wifi", parse_target->network_format_wifi,
+            sizeof(parse_target->network_format_wifi));
+    cfg_str(m, "format-ethernet", parse_target->network_format_ethernet,
+            sizeof(parse_target->network_format_ethernet));
+    cfg_str(m, "icon-wifi", parse_target->network_icon_wifi,
+            sizeof(parse_target->network_icon_wifi));
+    cfg_str(m, "icon-ethernet", parse_target->network_icon_ethernet,
+            sizeof(parse_target->network_icon_ethernet));
+    cfg_str(m, "icon-disconnected", parse_target->network_icon_disconnected,
+            sizeof(parse_target->network_icon_disconnected));
+    cfg_icons(m, "signal-icons", parse_target->network_signal_icons,
+              &parse_target->network_signal_icon_count, MANGOBAR_MAX_ICONS);
     parse_target->net_interval = cfg_int(m, "interval", parse_target->net_interval);
     cfg_alt(m, "network");
     set_module_actions(m, "network");
@@ -755,6 +769,21 @@ static void defaults_into(MangoConfig *cfg) {
            "%s", "{}");
   snprintf(cfg->network_format, sizeof(cfg->network_format), "%s",
            "{ifname}");
+  cfg->network_format_disconnected[0] = '\0';
+  snprintf(cfg->network_icon_wifi, sizeof(cfg->network_icon_wifi), "%s",
+           "󰖩");
+  snprintf(cfg->network_icon_ethernet, sizeof(cfg->network_icon_ethernet),
+           "%s", "󰈀");
+  snprintf(cfg->network_icon_disconnected,
+           sizeof(cfg->network_icon_disconnected), "%s", "󰖪");
+  static const char *network_signal_icons[] = {"󰤯", "󰤟", "󰤢", "󰤥", "󰤨"};
+  cfg->network_signal_icon_count = 0;
+  for (size_t i = 0;
+       i < sizeof(network_signal_icons) / sizeof(network_signal_icons[0]) &&
+       cfg->network_signal_icon_count < MANGOBAR_MAX_ICONS;
+       i++)
+    snprintf(cfg->network_signal_icons[cfg->network_signal_icon_count++], 16,
+             "%s", network_signal_icons[i]);
   snprintf(cfg->hide_clients_format, sizeof(cfg->hide_clients_format), "%s",
            "{}");
   MangoBatteryCfg *bc0 = &cfg->batteries[0];

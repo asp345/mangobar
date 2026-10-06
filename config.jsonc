@@ -47,7 +47,13 @@
     },
 
     "network": {
-        "format": "󰈀 {ifname}",
+        "format": "{icon} {ifname}",
+        "format-wifi": "{signal} {ssid}",
+        "format-disconnected": "{icon}",
+        "icon-wifi": "󰖩",
+        "icon-ethernet": "󰈀",
+        "icon-disconnected": "󰖪",
+        "signal-icons": ["󰤯", "󰤟", "󰤢", "󰤥", "󰤨"],
         "format-alt": "↓{down} ↑{up}",
         // "interval": 1  // seconds; omit to use the global "sys-interval"
     },

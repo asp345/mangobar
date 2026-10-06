@@ -11,6 +11,7 @@
 #include <getopt.h>
 #include <locale.h>
 #include <linux/input-event-codes.h>
+#include <linux/wireless.h>
 #include <libudev.h>
 #include <pixman.h>
 #include <poll.h>
@@ -25,6 +26,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -213,7 +215,9 @@ typedef struct {
   ModuleStyle st_tags_hover_scratch;
   Style st_tag_hover_css;
   ModuleStyle st_layout, st_title, st_clock, st_clock_date, st_cpu, st_mem;
-  ModuleStyle st_network, st_hide_clients, st_battery;
+  ModuleStyle st_network, st_network_connected, st_network_wifi;
+  ModuleStyle st_network_ethernet, st_network_disconnected;
+  ModuleStyle st_hide_clients, st_battery;
   ModuleStyle st_brightness, st_volume;
   ModuleStyle st_keymode, st_keyboardlayout;
   ModuleStyle st_custom[MANGOBAR_MAX_CUSTOM];
@@ -347,14 +351,52 @@ static void format_speed(double kbps, char *out, size_t outsz) {
     snprintf(out, outsz, "%.0fKB/s", kbps);
 }
 
-// Replace {down}/{up} in a network format and fill the rest with format_value
-static void format_network_alt(const char *fmt, const char *ifname,
-                               const char *down, const char *up, char *out,
-                               size_t outsz) {
-  char tmp[512];
-  const FmtArg args[] = {{"{down}", down}, {"{up}", up}};
-  format_expand(fmt, args, LENGTH(args), tmp, sizeof(tmp));
-  format_value(tmp, ifname, "", out, outsz);
+// Expand a network format. {ifname}/{} carry the interface name, {ssid} the
+// wireless SSID, {signal} the strength icon and {strength} the strength
+// percent, {status} is "connected"/"disconnected", {type} is "wifi"/"ethernet"
+// (empty otherwise), {icon} is the interface icon and {down}/{up} are the
+// speed-mode values.
+static void format_network(const char *fmt, const char *ifname,
+                           const char *ssid, const char *signal,
+                           const char *strength, const char *down,
+                           const char *up, const char *status, const char *type,
+                           const char *icon, char *out, size_t outsz) {
+  const FmtArg args[] = {
+      // Longer keys first: format_expand matches by prefix.
+      {"{signal-percent}", strength}, {"{}", ifname},
+      {"{ifname}", ifname},           {"{ssid}", ssid},
+      {"{essid}", ssid},              {"{signal}", signal},
+      {"{strength}", strength},       {"{percent}", ifname},
+      {"{usage}", ifname},            {"{volume}", ifname},
+      {"{load}", ifname},             {"{down}", down},
+      {"{up}", up},                   {"{status}", status},
+      {"{type}", type},               {"{icon}", icon},
+  };
+  format_expand(fmt, args, LENGTH(args), out, outsz);
+}
+
+// Pick the module icon for the current link state.
+static const char *network_icon(const char *wifi, const char *ethernet,
+                                const char *disconnected, bool up, int kind) {
+  if (!up)
+    return disconnected;
+  if (kind == 2)
+    return wifi;
+  if (kind == 1)
+    return ethernet;
+  return "";
+}
+
+// Map a dBm reading to a phone-like strength: -90 dBm and below is 0%, -70 dBm
+// and above is 100%, linear in between. This matches how phones show Wi-Fi
+// bars, so a "good" -70 dBm link already reports full strength.
+static int signal_percent(int dbm) {
+  int p = (dbm + 90) * 100 / 20;
+  if (p < 0)
+    p = 0;
+  if (p > 100)
+    p = 100;
+  return p;
 }
 
 // ---------- Bar ----------
@@ -491,6 +533,11 @@ typedef struct Bar {
   char time_str[16];
   uint8_t alt_on[MANGOBAR_MAX_ALTS];
   char net_ifname[64];
+  char net_ssid[64]; // wireless SSID (empty for wired / disconnected)
+  bool net_up;   // an active interface with a carrier is present
+  int net_kind;  // 0 = unknown, 1 = ethernet, 2 = wifi
+  int net_dbm;           // smoothed wireless signal level in dBm
+  bool net_signal_valid; // whether net_dbm holds a reading
   double net_rx_kbps, net_tx_kbps;
   bool redraw;
   bool overview_mode; // true when active_tags == [0]
@@ -1308,17 +1355,55 @@ static int append_module_entries(Bar *bar, int id, ModuleEntry *ents, int max,
     {
       int ai = alt_index("network");
       dst = texts[(*text_n)++];
+      const char *icon =
+          network_icon(g_cfg.network_icon_wifi, g_cfg.network_icon_ethernet,
+                       g_cfg.network_icon_disconnected, bar->net_up,
+                       bar->net_kind);
+      const char *status = bar->net_up ? "connected" : "disconnected";
+      const char *type = !bar->net_up ? ""
+                         : bar->net_kind == 2 ? "wifi"
+                         : bar->net_kind == 1 ? "ethernet"
+                                              : "";
+      const char *signal = "";
+      char strength[16] = "";
+      if (bar->net_signal_valid) {
+        int pct = signal_percent(bar->net_dbm);
+        signal = level_icon(g_cfg.network_signal_icons,
+                            g_cfg.network_signal_icon_count, pct);
+        snprintf(strength, sizeof(strength), "%d", pct);
+      }
       if (ai >= 0 && bar->alt_on[ai]) {
         char down[32], up[32];
         format_speed(bar->net_rx_kbps, down, sizeof(down));
         format_speed(bar->net_tx_kbps, up, sizeof(up));
-        format_network_alt(g_cfg.alts[ai].fmt, bar->net_ifname, down, up, dst,
-                           256);
+        format_network(g_cfg.alts[ai].fmt, bar->net_ifname, bar->net_ssid,
+                       signal, strength, down, up, status, type, icon, dst, 256);
       } else {
-        format_value(g_cfg.network_format, bar->net_ifname, "", dst, 256);
+        const char *fmt = g_cfg.network_format;
+        if (!bar->net_up) {
+          if (g_cfg.network_format_disconnected[0])
+            fmt = g_cfg.network_format_disconnected;
+        } else if (bar->net_kind == 2) {
+          if (g_cfg.network_format_wifi[0])
+            fmt = g_cfg.network_format_wifi;
+        } else if (bar->net_kind == 1) {
+          if (g_cfg.network_format_ethernet[0])
+            fmt = g_cfg.network_format_ethernet;
+        }
+        format_network(fmt, bar->net_ifname, bar->net_ssid, signal, strength,
+                       "", "", status, type, icon, dst, 256);
       }
-      ents[n++] = (ModuleEntry){.text = dst, .st = &g_rt->st_network,
-                                .module = "network", .tag = -1};
+      ModuleStyle *nst = &g_rt->st_network;
+      if (!bar->net_up)
+        nst = &g_rt->st_network_disconnected;
+      else if (bar->net_kind == 2)
+        nst = &g_rt->st_network_wifi;
+      else if (bar->net_kind == 1)
+        nst = &g_rt->st_network_ethernet;
+      else
+        nst = &g_rt->st_network_connected;
+      ents[n++] = (ModuleEntry){.text = dst, .st = nst, .module = "network",
+                                .tag = -1};
     }
     break;
   case M_HIDE_CLIENTS:
@@ -4045,7 +4130,9 @@ static void update_brightness() {
   }
 }
 
-// Create the udev backlight monitor (called once).
+static void update_network(void);
+
+// Create the udev monitor for backlight and network changes (called once).
 static void udev_init(void) {
   if (g_udev)
     return;
@@ -4060,11 +4147,13 @@ static void udev_init(void) {
   }
   udev_monitor_filter_add_match_subsystem_devtype(g_udev_mon, "backlight",
                                                   NULL);
+  udev_monitor_filter_add_match_subsystem_devtype(g_udev_mon, "net", NULL);
   udev_monitor_enable_receiving(g_udev_mon);
   g_udev_fd = udev_monitor_get_fd(g_udev_mon);
 }
 
-// Handle a backlight uevent; mark the module dirty for redraw.
+// Handle a uevent: backlight changes mark the module dirty, network changes
+// re-detect the active interface and redraw right away.
 static void udev_dispatch(void) {
   if (!g_udev_mon)
     return;
@@ -4073,7 +4162,12 @@ static void udev_dispatch(void) {
     return;
   const char *action = udev_device_get_action(dev);
   const char *sysname = udev_device_get_sysname(dev);
-  if (action && strcmp(action, "change") == 0 && sysname) {
+  const char *subsys = udev_device_get_subsystem(dev);
+  if (subsys && strcmp(subsys, "net") == 0) {
+    update_network();
+    Bar *b;
+    wl_list_for_each(b, &bar_list, link) b->redraw = true;
+  } else if (action && strcmp(action, "change") == 0 && sysname) {
     for (size_t i = 0; i < g_config_set.count; i++) {
       const MangoConfig *cfg = &g_config_set.profiles[i].config;
       if (!cfg->brightness_dev[0] ||
@@ -4086,49 +4180,173 @@ static void udev_dispatch(void) {
   udev_device_unref(dev);
 }
 
-// Network: active interface name + optional speed (sampled in speed mode)
+// Network interface kind, mirroring the state classes exposed to CSS.
+enum {
+  NET_KIND_UNKNOWN = 0,
+  NET_KIND_ETHERNET = 1,
+  NET_KIND_WIFI = 2,
+};
+
+// True when the link is up (carrier present and the interface is running).
+static bool iface_operstate_up(const char *ifn) {
+  char p[512], st[16];
+  snprintf(p, sizeof(p), "/sys/class/net/%.240s/operstate", ifn);
+  FILE *f = fopen(p, "r");
+  if (!f)
+    return false;
+  bool up = fscanf(f, "%15s", st) == 1 && strcmp(st, "up") == 0;
+  fclose(f);
+  return up;
+}
+
+// Wireless interfaces expose a "wireless" (or "phy80211") sysfs node; fall
+// back to the usual predictable interface-name prefixes when sysfs is absent.
+static bool iface_is_wireless(const char *ifn) {
+  char p[512];
+  struct stat sb;
+  snprintf(p, sizeof(p), "/sys/class/net/%.240s/wireless", ifn);
+  if (stat(p, &sb) == 0)
+    return true;
+  snprintf(p, sizeof(p), "/sys/class/net/%.240s/phy80211", ifn);
+  if (stat(p, &sb) == 0)
+    return true;
+  return strncmp(ifn, "wl", 2) == 0 || strstr(ifn, "wlan") ||
+         strstr(ifn, "wifi");
+}
+
+// Read the SSID and signal level (dBm) of an associated wireless interface via
+// the legacy wireless extensions ioctls. Leaves the SSID empty and *dbm at 0
+// on wired links or when the driver has no WEXT support.
+static void iface_wifi_info(const char *ifn, char *ssid, size_t ssidsz,
+                            int *dbm) {
+  if (ssid && ssidsz)
+    ssid[0] = '\0';
+  if (dbm)
+    *dbm = 0;
+  int fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd < 0)
+    return;
+  struct iwreq wrq;
+
+  if (ssid && ssidsz) {
+    memset(&wrq, 0, sizeof(wrq));
+    snprintf(wrq.ifr_ifrn.ifrn_name, sizeof(wrq.ifr_ifrn.ifrn_name), "%s", ifn);
+    char buf[IW_ESSID_MAX_SIZE + 1];
+    memset(buf, 0, sizeof(buf));
+    wrq.u.essid.pointer = buf;
+    wrq.u.essid.length = IW_ESSID_MAX_SIZE;
+    wrq.u.essid.flags = 0;
+    if (ioctl(fd, SIOCGIWESSID, &wrq) == 0) {
+      size_t n = wrq.u.essid.length;
+      if (n >= sizeof(buf))
+        n = sizeof(buf) - 1;
+      buf[n] = '\0';
+      snprintf(ssid, ssidsz, "%s", buf);
+    }
+  }
+
+  if (dbm) {
+    memset(&wrq, 0, sizeof(wrq));
+    snprintf(wrq.ifr_ifrn.ifrn_name, sizeof(wrq.ifr_ifrn.ifrn_name), "%s", ifn);
+    struct iw_statistics stats;
+    memset(&stats, 0, sizeof(stats));
+    wrq.u.data.pointer = &stats;
+    wrq.u.data.length = sizeof(stats);
+    if (ioctl(fd, SIOCGIWSTATS, &wrq) == 0) {
+      if (stats.qual.updated & IW_QUAL_DBM)
+        *dbm = (signed char)stats.qual.level;
+      else if ((signed char)stats.qual.level < 0)
+        // Level not flagged as dBm but is negative, so treat it as dBm.
+        *dbm = (signed char)stats.qual.level;
+      else
+        // Quality-only drivers: map the 0-100 quality onto -100..-50 dBm.
+        *dbm = -100 + stats.qual.qual / 2;
+    }
+  }
+  close(fd);
+}
+
+// Detect the interface currently carrying traffic. Prefer the default-route
+// interface with the lowest metric (so ethernet wins over wifi when both are
+// plugged in), then any other interface that is up. Re-run on every poll so a
+// link change (e.g. unplugging ethernet in favor of wifi) is picked up.
+static void detect_active_iface(char *out, size_t outsz, int *kind) {
+  char best[64] = "";
+  long best_metric = -1;
+
+  FILE *f = fopen("/proc/net/route", "r");
+  if (f) {
+    char line[256];
+    if (fgets(line, sizeof(line), f) == NULL)
+      line[0] = '\0'; // header; bail out of the loop below
+    while (fgets(line, sizeof(line), f)) {
+      char ifn[64], dst[16];
+      long metric;
+      // Columns: Iface Destination Gateway Flags RefCnt Use Metric Mask ...
+      // A default route means the interface is the one carrying traffic.
+      if (sscanf(line, "%63s %15s %*s %*s %*s %*s %ld", ifn, dst, &metric) ==
+              3 &&
+          strcmp(dst, "00000000") == 0 &&
+          (best_metric < 0 || metric < best_metric)) {
+        best_metric = metric;
+        snprintf(best, sizeof(best), "%.63s", ifn);
+      }
+    }
+    fclose(f);
+  }
+
+  if (!best[0]) {
+    DIR *d = opendir("/sys/class/net");
+    if (d) {
+      struct dirent *e;
+      while ((e = readdir(d))) {
+        if (e->d_name[0] == '.' || strcmp(e->d_name, "lo") == 0)
+          continue;
+        if (!iface_operstate_up(e->d_name))
+          continue;
+        snprintf(best, sizeof(best), "%.63s", e->d_name);
+        break;
+      }
+      closedir(d);
+    }
+  }
+
+  if (best[0]) {
+    snprintf(out, outsz, "%s", best);
+    *kind = iface_is_wireless(best) ? NET_KIND_WIFI : NET_KIND_ETHERNET;
+  } else {
+    out[0] = '\0';
+    *kind = NET_KIND_UNKNOWN;
+  }
+}
+
+// Network: active interface name + link state + optional speed (speed mode)
 static void update_network(void) {
-  static char ifname[64];
-  static bool ifname_init;
-  if (!ifname_init) {
-    ifname_init = true;
-    FILE *f = fopen("/proc/net/route", "r");
-    if (f) {
-      char line[256];
-      if (fgets(line, sizeof(line), f) == NULL)
-        line[0] = '\0'; // header; bail out of the loop below
-      while (fgets(line, sizeof(line), f)) {
-        char ifn[64], dst[16];
-        if (sscanf(line, "%31s %15s", ifn, dst) == 2 &&
-            strcmp(dst, "00000000") == 0) {
-          snprintf(ifname, sizeof(ifname), "%s", ifn);
-          break;
-        }
-      }
-      fclose(f);
-    }
-    if (!ifname[0]) {
-      DIR *d = opendir("/sys/class/net");
-      if (d) {
-        struct dirent *e;
-        while ((e = readdir(d))) {
-          if (e->d_name[0] == '.' || strcmp(e->d_name, "lo") == 0)
-            continue;
-          char p[512], st[16] = "";
-          snprintf(p, sizeof(p), "/sys/class/net/%.240s/operstate",
-                   e->d_name);
-          FILE *sf = fopen(p, "r");
-          if (sf) {
-            if (fscanf(sf, "%15s", st) == 1 && strcmp(st, "up") == 0)
-              snprintf(ifname, sizeof(ifname), "%.63s", e->d_name);
-            fclose(sf);
-          }
-          if (ifname[0])
-            break;
-        }
-        closedir(d);
-      }
-    }
+  char ifname[64];
+  int kind = NET_KIND_UNKNOWN;
+  detect_active_iface(ifname, sizeof(ifname), &kind);
+  bool up = ifname[0] != '\0';
+
+  // SSID / signal strength are only meaningful for an associated wireless
+  // link; both stay empty/-1 otherwise.
+  char ssid[64] = "";
+  int dbm = 0;
+  if (up && kind == NET_KIND_WIFI)
+    iface_wifi_info(ifname, ssid, sizeof(ssid), &dbm);
+
+  // Smooth the instantaneous RSSI so the icon does not flap between adjacent
+  // levels; phones average the reading in much the same way.
+  static int smooth_dbm;
+  static char smooth_if[64];
+  bool signal_valid = dbm != 0;
+  if (signal_valid) {
+    if (strcmp(smooth_if, ifname) != 0)
+      smooth_dbm = dbm;
+    else
+      smooth_dbm += (dbm - smooth_dbm) / 3;
+    snprintf(smooth_if, sizeof(smooth_if), "%s", ifname);
+  } else {
+    smooth_if[0] = '\0';
   }
 
   Bar *b;
@@ -4138,6 +4356,11 @@ static void update_network(void) {
     if (nai >= 0 && b->alt_on[nai])
       need_speed = true;
     snprintf(b->net_ifname, sizeof(b->net_ifname), "%s", ifname);
+    snprintf(b->net_ssid, sizeof(b->net_ssid), "%s", ssid);
+    b->net_up = up;
+    b->net_kind = kind;
+    b->net_signal_valid = signal_valid;
+    b->net_dbm = smooth_dbm;
   }
   if (!need_speed || !ifname[0])
     return;
@@ -4982,6 +5205,11 @@ static void init_profile_styles(ProfileRuntime *rt, MangoConfigProfile *profile)
   hex_to_pixman(keyboardlayout_bg_color_hex, &rt->st_keyboardlayout.bg);
   hex_to_pixman(clock_fg_color_hex, &rt->st_network.fg);
   hex_to_pixman(clock_bg_color_hex, &rt->st_network.bg);
+  // Link-state variants inherit the base defaults; CSS states refine them.
+  rt->st_network_connected = rt->st_network;
+  rt->st_network_wifi = rt->st_network;
+  rt->st_network_ethernet = rt->st_network;
+  rt->st_network_disconnected = rt->st_network;
   hex_to_pixman(hide_clients_fg_color_hex, &rt->st_hide_clients.fg);
   hex_to_pixman(hide_clients_bg_color_hex, &rt->st_hide_clients.bg);
   hex_to_pixman(battery_fg_color_hex, &rt->st_battery.fg);
@@ -5041,7 +5269,28 @@ static void init_profile_styles(ProfileRuntime *rt, MangoConfigProfile *profile)
   apply_css(&rt->st_volume, "volume", NULL);
   apply_css(&rt->st_keymode, "keymode", NULL);
   apply_css(&rt->st_keyboardlayout, "keyboardlayout", NULL);
-  apply_css(&rt->st_network, "network", NULL);
+  // Network: base #network plus combinable .connected/.disconnected and
+  // .wifi/.ethernet states, so a link change can restyle the module.
+  {
+    Style net_base = style_resolve(&g_style_sheet, "network", NULL);
+    Style net_conn =
+        style_resolve_module_only(&g_style_sheet, "network", "connected");
+    Style net_wifi =
+        style_resolve_module_only(&g_style_sheet, "network", "wifi");
+    Style net_eth =
+        style_resolve_module_only(&g_style_sheet, "network", "ethernet");
+    Style net_disc =
+        style_resolve_module_only(&g_style_sheet, "network", "disconnected");
+    apply_css_resolved(&rt->st_network, net_base);
+    Style net_connected = style_overlay(&net_base, &net_conn);
+    apply_css_resolved(&rt->st_network_connected, net_connected);
+    apply_css_resolved(&rt->st_network_wifi,
+                       style_overlay(&net_connected, &net_wifi));
+    apply_css_resolved(&rt->st_network_ethernet,
+                       style_overlay(&net_connected, &net_eth));
+    apply_css_resolved(&rt->st_network_disconnected,
+                       style_overlay(&net_base, &net_disc));
+  }
   apply_css(&rt->st_hide_clients, "hideclients", NULL);
   apply_css(&rt->st_battery, "battery", NULL);
   apply_css(&rt->st_overview, "overview", NULL);
